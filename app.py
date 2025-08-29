@@ -35,7 +35,7 @@ CONFIG = {
 
 def save_to_excel(data):
     """
-    Saves brand data to Excel file.
+    Saves brand data to Excel file (limited to first 10 brands).
     """
     try:
         wb = Workbook()
@@ -44,13 +44,15 @@ def save_to_excel(data):
         # Add headers
         ws.append(['Brand Name', 'Number of Products', 'Total Sales', 'Extraction Time'])
         
-        # Add data with timestamp
+        # Add data with timestamp (limit to first 10 brands)
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        for brand_name, num_products, total_sales in data:
+        for i, (brand_name, num_products, total_sales) in enumerate(data):
+            if i >= 10:  # Only save first 10 brands
+                break
             ws.append([brand_name, num_products, total_sales, current_time])
             
         wb.save(CONFIG['OUTPUT_FILE'])
-        logging.info(f"Saved {len(data)} brands to {CONFIG['OUTPUT_FILE']}")
+        logging.info(f"Saved {min(len(data), 10)} brands to {CONFIG['OUTPUT_FILE']}")
 
     except Exception as e:
         logging.error(f"Error saving Excel file: {str(e)}")
@@ -151,11 +153,17 @@ def scrape_euka_brands(url):
             # Extract brand data
             brands_data = []
             
-            # Find all table rows
+            # Find the specific table with "Brands featuring this category" title
+            # Look for the table that contains the brands data
             table_rows = driver.find_elements(By.CSS_SELECTOR, "tr.group")
-            logging.info(f"Found {len(table_rows)} brand rows")
+            logging.info(f"Found {len(table_rows)} total table rows")
             
+            # Limit to first 10 brand rows only
+            count = 0
             for row in table_rows:
+                if count >= 10:  # Only extract first 10 brands
+                    break
+                    
                 try:
                     # Extract brand name (first td with button)
                     brand_button = row.find_element(By.CSS_SELECTOR, "td button")
@@ -177,6 +185,7 @@ def scrape_euka_brands(url):
                     if brand_name:
                         brands_data.append((brand_name, num_products, total_sales))
                         logging.info(f"Extracted: {brand_name} - {num_products} products - {total_sales}")
+                        count += 1
                     
                 except Exception as e:
                     logging.warning(f"Error extracting data from row: {str(e)}")
