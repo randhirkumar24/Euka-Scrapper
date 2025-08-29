@@ -27,118 +27,36 @@ logging.basicConfig(
 
 # Configuration
 CONFIG = {
-    'BATCH_SIZE': 50,           # Reduced batch size for more frequent saves
-    'SCROLL_WAIT': 1.5,         # Increased base wait time
-    'MAX_RETRIES': 5,           # Maximum number of retries
-    'TIMEOUT': 20,              # Increased timeout
-    'MAX_WORKERS': 4,           # Maximum number of parallel workers
-    'MASTER_FILE': 'master_localities.xlsx',
-    'SCROLL_STEP': 500,         # Reduced scroll step for better reliability
-    'MAX_SCROLL_ATTEMPTS': 5,
-    'SCROLL_MULTIPLIER': 1.5,
-    'PROGRESS_FILE': 'scraping_progress.json',
-    'RECOVERY_WAIT': 60,        # Increased recovery wait time
-    'MAX_ERRORS': 5,           # Increased max errors
-    'RATE_LIMIT_PAUSE': 300,    # 5 minutes pause if rate limited
-    'SCROLL_PAUSE_INTERVAL': 10,  # Save progress every 10 scrolls
-    # City-specific minimum localities thresholds
-    'CITY_THRESHOLDS': {
-        'mumbai': 3000,    # Mumbai has 3000+ localities
-        'delhi': 2500,     # Delhi has 2500+ localities
-        'bangalore': 2000, # Bangalore has 2000+ localities
-        'default': 500     # Default threshold for other cities
-    }
+    'TIMEOUT': 30,              # Timeout for page loading
+    'MAX_RETRIES': 3,           # Maximum number of retries
+    'WAIT_TIME': 5,             # Wait time for page to load completely
+    'OUTPUT_FILE': 'euka_brands_data.xlsx'
 }
 
-def load_progress():
+def save_to_excel(data):
     """
-    Load progress from the progress file.
-    """
-    try:
-        if os.path.exists(CONFIG['PROGRESS_FILE']):
-            with open(CONFIG['PROGRESS_FILE'], 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        logging.warning(f"Could not load progress file: {str(e)}")
-    return {'completed_urls': [], 'partial_data': {}}
-
-def save_progress(completed_urls, current_url=None, seen_titles=None):
-    """
-    Save progress to the progress file.
+    Saves brand data to Excel file.
     """
     try:
-        progress = {
-            'completed_urls': completed_urls,
-            'partial_data': {}
-        }
-        if current_url and seen_titles:
-            progress['partial_data'] = {
-                'url': current_url,
-                'seen_titles': list(seen_titles)
-            }
-        with open(CONFIG['PROGRESS_FILE'], 'w') as f:
-            json.dump(progress, f)
-    except Exception as e:
-        logging.error(f"Error saving progress: {str(e)}")
-
-def save_to_excel(data, folder_name, file_index, city_name):
-    """
-    Saves data to both individual Excel file and master Excel file.
-    """
-    try:
-        # Save to individual city file
-        file_name = os.path.join(folder_name, f"localities_{file_index}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
         wb = Workbook()
         ws = wb.active
         
         # Add headers
-        ws.append(['Locality Name', 'City', 'Extraction Time'])
+        ws.append(['Brand Name', 'Number of Products', 'Total Sales', 'Extraction Time'])
         
-        # Add data with timestamp and city name
+        # Add data with timestamp
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        for row in data:
-            ws.append([row, city_name, current_time])
+        for brand_name, num_products, total_sales in data:
+            ws.append([brand_name, num_products, total_sales, current_time])
             
-        wb.save(file_name)
-        logging.info(f"Saved {len(data)} entries to {file_name}")
-
-        # Update master file
-        update_master_file(data, city_name)
+        wb.save(CONFIG['OUTPUT_FILE'])
+        logging.info(f"Saved {len(data)} brands to {CONFIG['OUTPUT_FILE']}")
 
     except Exception as e:
         logging.error(f"Error saving Excel file: {str(e)}")
         raise
 
-def update_master_file(data, city_name):
-    """
-    Updates the master Excel file with new locality data.
-    """
-    try:
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        new_data = [[locality, city_name, current_time] for locality in data]
-        
-        if os.path.exists(CONFIG['MASTER_FILE']):
-            # Load existing master file
-            df_existing = pd.read_excel(CONFIG['MASTER_FILE'])
-            df_new = pd.DataFrame(new_data, columns=['Locality Name', 'City', 'Extraction Time'])
-            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-            
-            # Remove duplicates keeping the latest entry
-            df_combined = df_combined.sort_values('Extraction Time').drop_duplicates(
-                subset=['Locality Name', 'City'], 
-                keep='last'
-            )
-        else:
-            # Create new master file
-            df_combined = pd.DataFrame(new_data, columns=['Locality Name', 'City', 'Extraction Time'])
-        
-        # Save master file
-        df_combined.to_excel(CONFIG['MASTER_FILE'], index=False)
-        logging.info(f"Updated master file with {len(data)} entries for {city_name}")
-        
-    except Exception as e:
-        logging.error(f"Error updating master file: {str(e)}")
-        raise
+
 
 def setup_driver():
     """
@@ -194,349 +112,116 @@ def setup_driver():
     
     return webdriver.Chrome(service=service, options=options)
 
-def check_for_rate_limit(driver):
-    """
-    Check if we're being rate limited or blocked.
-    """
-    try:
-        # Check for common rate limit indicators
-        rate_limit_indicators = [
-            "too many requests",
-            "rate limit exceeded",
-            "please try again later",
-            "access denied",
-            "blocked"
-        ]
-        page_source = driver.page_source.lower()
-        for indicator in rate_limit_indicators:
-            if indicator in page_source:
-                return True
-                
-        # Check if the page is blank or missing expected elements
-        if not driver.find_elements(By.CLASS_NAME, "loc-card__title"):
-            return True
-            
-        return False
-    except Exception:
-        return False
 
-def scroll_page(driver):
-    """
-    Simulates pressing End key for very fast scrolling.
-    """
-    try:
-        # Get current height
-        current_height = driver.execute_script("return document.body.scrollHeight")
-        
-        # Scroll to bottom of page (like pressing End key)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        
-        # Very short delay to allow content to load
-        time.sleep(0.5)
-        
-        # Get new height after scroll and content load
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        
-        # Return True if the page height increased (meaning more content loaded)
-        return new_height > current_height
-    except Exception as e:
-        logging.warning(f"Scroll operation failed: {str(e)}")
-        return False
 
-def get_min_localities_threshold(city_name):
+def scrape_euka_brands(url):
     """
-    Get the minimum expected localities for a specific city.
-    """
-    city_key = city_name.lower()
-    return CONFIG['CITY_THRESHOLDS'].get(city_key, CONFIG['CITY_THRESHOLDS']['default'])
-
-def reset_progress():
-    """
-    Reset the progress file to start fresh.
-    """
-    if os.path.exists(CONFIG['PROGRESS_FILE']):
-        os.remove(CONFIG['PROGRESS_FILE'])
-        logging.info("Reset progress file for fresh start")
-
-def merge_excel_files(folder_name, city_name):
-    """
-    Merges all Excel files in the folder into a single merged file.
-    """
-    try:
-        all_data = []
-        merged_file = os.path.join(folder_name, f"{city_name}_merged_localities.xlsx")
-        
-        # Read all Excel files in the folder
-        for file in os.listdir(folder_name):
-            if file.startswith("localities_") and file.endswith(".xlsx"):
-                file_path = os.path.join(folder_name, file)
-                df = pd.read_excel(file_path)
-                all_data.extend(df.values.tolist())
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_data = []
-        for item in all_data:
-            if item[0] not in seen:  # Check first column (locality name)
-                seen.add(item[0])
-                unique_data.append(item)
-        
-        # Create new Excel file with unique data
-        df_merged = pd.DataFrame(unique_data, columns=['Locality Name', 'City', 'Extraction Time'])
-        df_merged.to_excel(merged_file, index=False)
-        logging.info(f"Created merged file with {len(unique_data)} unique localities: {merged_file}")
-        
-    except Exception as e:
-        logging.error(f"Error merging Excel files: {str(e)}")
-
-def save_and_merge_data(data, folder_name, city_name):
-    """
-    Saves new data directly to a single merged file, replacing the old one.
-    """
-    try:
-        merged_file = os.path.join(folder_name, f"{city_name}_localities.xlsx")
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        new_data = [[locality, city_name, current_time] for locality in data]
-        
-        if os.path.exists(merged_file):
-            # Load existing data and append new data
-            df_existing = pd.read_excel(merged_file)
-            df_new = pd.DataFrame(new_data, columns=['Locality Name', 'City', 'Extraction Time'])
-            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-            
-            # Remove duplicates keeping the latest entry
-            df_combined = df_combined.sort_values('Extraction Time').drop_duplicates(
-                subset=['Locality Name'], 
-                keep='last'
-            )
-        else:
-            # Create new file
-            df_combined = pd.DataFrame(new_data, columns=['Locality Name', 'City', 'Extraction Time'])
-        
-        # Save merged file
-        df_combined.to_excel(merged_file, index=False)
-        logging.info(f"Updated merged file with {len(data)} new entries. Total unique localities: {len(df_combined)}")
-        
-        # Update master file
-        update_master_file(data, city_name)
-        
-    except Exception as e:
-        logging.error(f"Error saving/merging data: {str(e)}")
-        raise
-
-def scrape_locality(url, folder_name, resume_data=None):
-    """
-    Scrapes locality information with continuous merging of data.
+    Scrapes brand information from Euka website.
     """
     driver = None
     retry_count = 0
-    error_count = 0
-    city_name = url.split("localities-in-")[-1].replace("/", "").capitalize()
-    min_expected = get_min_localities_threshold(city_name)
-
-    # Initialize or resume progress
-    seen_titles = set(resume_data) if resume_data else set()
-    batch_data = []
-    scroll_count = 0
-    consecutive_same_height = 0
-
-    while error_count < CONFIG['MAX_ERRORS']:
+    
+    while retry_count < CONFIG['MAX_RETRIES']:
         try:
             driver = setup_driver()
-            logging.info(f"Starting/Resuming scraping for {city_name}")
-            logging.info(f"Already collected localities: {len(seen_titles)}")
-            logging.info(f"Minimum expected localities for {city_name}: {min_expected}")
-
-            os.makedirs(folder_name, exist_ok=True)
-
+            logging.info(f"Starting scraping for Euka brands from: {url}")
+            
             # Load page with retries
-            while retry_count < CONFIG['MAX_RETRIES']:
+            try:
+                driver.get(url)
+                logging.info("Page loaded, waiting for content to appear...")
+                
+                # Wait for the page to load completely
+                time.sleep(CONFIG['WAIT_TIME'])
+                
+                # Wait for table rows to be present
+                WebDriverWait(driver, CONFIG['TIMEOUT']).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "tr.group"))
+                )
+                
+                logging.info("Page loaded successfully, extracting brand data...")
+                
+            except TimeoutException:
+                retry_count += 1
+                logging.warning(f"Timeout loading page, retry {retry_count}/{CONFIG['MAX_RETRIES']}")
+                if retry_count == CONFIG['MAX_RETRIES']:
+                    raise Exception("Failed to load page after maximum retries")
+                continue
+            
+            # Extract brand data
+            brands_data = []
+            
+            # Find all table rows
+            table_rows = driver.find_elements(By.CSS_SELECTOR, "tr.group")
+            logging.info(f"Found {len(table_rows)} brand rows")
+            
+            for row in table_rows:
                 try:
-                    driver.get(url)
-                    WebDriverWait(driver, CONFIG['TIMEOUT']).until(
-                        EC.presence_of_all_elements_located((By.CLASS_NAME, "loc-card__title"))
-                    )
-                    break
-                except TimeoutException:
-                    retry_count += 1
-                    logging.warning(f"Timeout loading page, retry {retry_count}/{CONFIG['MAX_RETRIES']}")
-                    if retry_count == CONFIG['MAX_RETRIES']:
-                        raise
-
-            no_new_data_count = 0
-            last_count = len(seen_titles)
-            last_height = driver.execute_script("return document.body.scrollHeight")
-
-            while no_new_data_count < 5:  # Increased tolerance for no new data
-                # Extract locality titles
-                titles = driver.find_elements(By.CLASS_NAME, "loc-card__title")
-                initial_count = len(seen_titles)
-
-                for title in titles:
-                    title_text = title.text.strip()
-                    if title_text and title_text not in seen_titles:
-                        seen_titles.add(title_text)
-                        batch_data.append(title_text)
-
-                # Save and merge batch if size reached
-                if len(batch_data) >= CONFIG['BATCH_SIZE']:
-                    save_and_merge_data(batch_data, folder_name, city_name)
-                    batch_data = []
-                    save_progress([], url, seen_titles)
-                    logging.info(f"Progress saved. Current localities: {len(seen_titles)}")
-
-                # Scroll to bottom and check if more content loaded
-                more_content = scroll_page(driver)
-                scroll_count += 1
-
-                # Get current height
-                new_height = driver.execute_script("return document.body.scrollHeight")
-
-                # Check if we're really at the bottom
-                if new_height == last_height:
-                    consecutive_same_height += 1
-                    if consecutive_same_height >= 3:  # If height hasn't changed in 3 attempts
-                        if len(seen_titles) == initial_count:  # And no new data
-                            no_new_data_count += 1
-                else:
-                    consecutive_same_height = 0
-                    no_new_data_count = 0
-
-                last_height = new_height
-
-                # Show progress
-                if len(seen_titles) > last_count:
-                    logging.info(f"Found {len(seen_titles)} localities in {city_name}")
-                    last_count = len(seen_titles)
-
-                # If we haven't found any new data in a while, try refreshing the page
-                if no_new_data_count == 3:
-                    logging.info("No new data found, refreshing page...")
-                    driver.refresh()
-                    time.sleep(2)  # Wait for page to reload
-                    WebDriverWait(driver, CONFIG['TIMEOUT']).until(
-                        EC.presence_of_all_elements_located((By.CLASS_NAME, "loc-card__title"))
-                    )
-
-            # Save remaining data
-            if batch_data:
-                save_and_merge_data(batch_data, folder_name, city_name)
-
-            # Verify we got enough localities
-            if len(seen_titles) < min_expected:
-                logging.warning(f"Found only {len(seen_titles)} localities for {city_name}, expected at least {min_expected}. Retrying...")
-                raise Exception(f"Insufficient localities found for {city_name}")
-
-            logging.info(f"Completed scraping for {city_name}. Total localities found: {len(seen_titles)}")
-            return len(seen_titles)
-
-        except Exception as e:
-            error_count += 1
-            logging.error(f"Error scraping {url} (attempt {error_count}): {str(e)}")
-            if error_count < CONFIG['MAX_ERRORS']:
-                logging.info(f"Waiting {CONFIG['RECOVERY_WAIT']} seconds before retrying...")
-                time.sleep(CONFIG['RECOVERY_WAIT'])
+                    # Extract brand name (first td with button)
+                    brand_button = row.find_element(By.CSS_SELECTOR, "td button")
+                    brand_name = brand_button.text.strip()
+                    
+                    # Extract number of products (second td)
+                    tds = row.find_elements(By.CSS_SELECTOR, "td")
+                    if len(tds) >= 2:
+                        num_products = tds[1].text.strip()
+                    else:
+                        num_products = "N/A"
+                    
+                    # Extract total sales (third td)
+                    if len(tds) >= 3:
+                        total_sales = tds[2].text.strip()
+                    else:
+                        total_sales = "N/A"
+                    
+                    if brand_name:
+                        brands_data.append((brand_name, num_products, total_sales))
+                        logging.info(f"Extracted: {brand_name} - {num_products} products - {total_sales}")
+                    
+                except Exception as e:
+                    logging.warning(f"Error extracting data from row: {str(e)}")
+                    continue
+            
+            logging.info(f"Successfully extracted data for {len(brands_data)} brands")
+            
+            # Save to Excel
+            if brands_data:
+                save_to_excel(brands_data)
+                return len(brands_data)
             else:
-                logging.error(f"Max errors reached for {url}, skipping...")
+                raise Exception("No brand data found on the page")
+                
+        except Exception as e:
+            retry_count += 1
+            logging.error(f"Error scraping {url} (attempt {retry_count}): {str(e)}")
+            if retry_count < CONFIG['MAX_RETRIES']:
+                logging.info("Retrying...")
+                time.sleep(5)
+            else:
+                logging.error(f"Max retries reached for {url}")
                 raise
         finally:
             if driver:
                 driver.quit()
 
-def scrape_multiple_localities_sequential(urls):
-    """
-    Scrapes multiple localities sequentially with resume capability.
-    """
-    results = {}
-    failed_urls = []
-    total_urls = len(urls)
-    
-    # Load previous progress
-    progress = load_progress()
-    completed_urls = set(progress.get('completed_urls', []))
-    partial_data = progress.get('partial_data', {})
-
-    for index, url in enumerate(urls, 1):
-        if url in completed_urls:
-            logging.info(f"Skipping already completed URL: {url}")
-            continue
-
-        try:
-            logging.info(f"\n=== Processing URL {index}/{total_urls} ===")
-            logging.info(f"Current URL: {url}")
-            
-            city_name = url.split("localities-in-")[-1].replace("/", "").capitalize()
-            folder_name = f"localities_in_{city_name}"
-            
-            # Add delay between URLs
-            if index > 1:
-                logging.info("Waiting 5 seconds before processing next URL...")
-                time.sleep(5)
-            
-            # Resume from partial data if available
-            resume_data = None
-            if partial_data.get('url') == url:
-                resume_data = partial_data.get('seen_titles', [])
-                logging.info(f"Resuming from previous session with {len(resume_data)} localities")
-
-            # Process the URL
-            count = scrape_locality(url, folder_name, resume_data)
-            results[url] = count
-            completed_urls.add(url)
-            save_progress(list(completed_urls))
-            
-            # Show progress
-            logging.info(f"\n--- Progress Update ---")
-            logging.info(f"Completed: {index}/{total_urls} URLs")
-            logging.info(f"Success rate: {len(results)}/{index}")
-            logging.info(f"Latest URL: {url} - Found {count} localities")
-            
-        except Exception as e:
-            failed_urls.append(url)
-            logging.error(f"Failed to scrape {url}: {str(e)}")
-            logging.info(f"Moving to next URL...")
-
-    # Final report
-    logging.info("\n=== Final Scraping Summary ===")
-    logging.info(f"Total URLs processed: {total_urls}")
-    logging.info(f"Successfully scraped: {len(results)} URLs")
-    logging.info(f"Failed to scrape: {len(failed_urls)} URLs")
-    
-    if results:
-        logging.info("\nSuccessful Results:")
-        for url, count in results.items():
-            city = url.split("localities-in-")[-1].replace("/", "").capitalize()
-            logging.info(f"- {city}: {count} localities")
-    
-    if failed_urls:
-        logging.info("\nFailed URLs:")
-        for url in failed_urls:
-            logging.info(f"- {url}")
-    
-    return results, failed_urls
-
-# List of URLs to scrape
-urls = [
-        "https://www.magicbricks.com/localities-in-gurgaon/",
-
-        
-    # Add more URLs here
-]
+# URL to scrape
+url = "https://app.euka.ai/social-intelligence/categories/7"
 
 if __name__ == "__main__":
-    logging.info("Starting locality extraction process")
-    logging.info(f"Total cities to process: {len(urls)}")
-    
-    # Reset progress to start fresh
-    reset_progress()
+    logging.info("Starting Euka brand extraction process")
+    logging.info(f"Target URL: {url}")
     
     start_time = time.time()
-    results, failed_urls = scrape_multiple_localities_sequential(urls)
+    
+    try:
+        count = scrape_euka_brands(url)
+        logging.info(f"Successfully extracted data for {count} brands")
+    except Exception as e:
+        logging.error(f"Failed to scrape brands: {str(e)}")
     
     end_time = time.time()
     total_time = end_time - start_time
-    hours = int(total_time // 3600)
-    minutes = int((total_time % 3600) // 60)
+    minutes = int(total_time // 60)
     seconds = total_time % 60
     
-    logging.info(f"\nTotal execution time: {hours}h {minutes}m {seconds:.2f}s")
+    logging.info(f"\nTotal execution time: {minutes}m {seconds:.2f}s")
