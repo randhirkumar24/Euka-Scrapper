@@ -35,7 +35,7 @@ CONFIG = {
 
 def save_to_excel(data):
     """
-    Saves brand data to Excel file (limited to first 10 brands).
+    Saves brand data to Excel file (saves all brands from both pages).
     """
     try:
         wb = Workbook()
@@ -44,15 +44,13 @@ def save_to_excel(data):
         # Add headers
         ws.append(['Brand Name', 'Number of Products', 'Total Sales', 'Extraction Time'])
         
-        # Add data with timestamp (limit to first 10 brands)
+        # Add data with timestamp (save all brands from both pages)
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        for i, (brand_name, num_products, total_sales) in enumerate(data):
-            if i >= 10:  # Only save first 10 brands
-                break
+        for brand_name, num_products, total_sales in data:
             ws.append([brand_name, num_products, total_sales, current_time])
             
         wb.save(CONFIG['OUTPUT_FILE'])
-        logging.info(f"Saved {min(len(data), 10)} brands to {CONFIG['OUTPUT_FILE']}")
+        logging.info(f"Saved {len(data)} brands to {CONFIG['OUTPUT_FILE']}")
 
     except Exception as e:
         logging.error(f"Error saving Excel file: {str(e)}")
@@ -118,7 +116,7 @@ def setup_driver():
 
 def scrape_euka_brands(url):
     """
-    Scrapes brand information from Euka website.
+    Scrapes brand information from Euka website across multiple pages.
     """
     driver = None
     retry_count = 0
@@ -128,7 +126,7 @@ def scrape_euka_brands(url):
             driver = setup_driver()
             logging.info(f"Starting scraping for Euka brands from: {url}")
             
-            # Load page with retries
+            # Load initial page with retries
             try:
                 driver.get(url)
                 logging.info("Page loaded, waiting for content to appear...")
@@ -141,7 +139,7 @@ def scrape_euka_brands(url):
                     EC.presence_of_all_elements_located((By.CSS_SELECTOR, "tr.group"))
                 )
                 
-                logging.info("Page loaded successfully, extracting brand data...")
+                logging.info("Page loaded successfully, starting extraction...")
                 
             except TimeoutException:
                 retry_count += 1
@@ -150,55 +148,49 @@ def scrape_euka_brands(url):
                     raise Exception("Failed to load page after maximum retries")
                 continue
             
-            # Extract brand data
-            brands_data = []
+            # Extract brand data from multiple pages
+            all_brands_data = []
             
-            # Find the specific table with "Brands featuring this category" title
-            # Look for the table that contains the brands data
-            table_rows = driver.find_elements(By.CSS_SELECTOR, "tr.group")
-            logging.info(f"Found {len(table_rows)} total table rows")
+            # Scrape page 1
+            logging.info("=== Scraping Page 1 ===")
+            page1_data = extract_brands_from_current_page(driver)
+            all_brands_data.extend(page1_data)
+            logging.info(f"Page 1: Extracted {len(page1_data)} brands")
             
-            # Limit to first 10 brand rows only
-            count = 0
-            for row in table_rows:
-                if count >= 10:  # Only extract first 10 brands
-                    break
-                    
-                try:
-                    # Extract brand name (first td with button)
-                    brand_button = row.find_element(By.CSS_SELECTOR, "td button")
-                    brand_name = brand_button.text.strip()
-                    
-                    # Extract number of products (second td)
-                    tds = row.find_elements(By.CSS_SELECTOR, "td")
-                    if len(tds) >= 2:
-                        num_products = tds[1].text.strip()
-                    else:
-                        num_products = "N/A"
-                    
-                    # Extract total sales (third td)
-                    if len(tds) >= 3:
-                        total_sales = tds[2].text.strip()
-                    else:
-                        total_sales = "N/A"
-                    
-                    if brand_name:
-                        brands_data.append((brand_name, num_products, total_sales))
-                        logging.info(f"Extracted: {brand_name} - {num_products} products - {total_sales}")
-                        count += 1
-                    
-                except Exception as e:
-                    logging.warning(f"Error extracting data from row: {str(e)}")
-                    continue
+            # Navigate to page 2
+            try:
+                logging.info("=== Navigating to Page 2 ===")
+                page2_button = driver.find_element(By.XPATH, "//button[text()='2']")
+                page2_button.click()
+                
+                # Wait for page 2 to load
+                time.sleep(CONFIG['WAIT_TIME'])
+                
+                # Wait for table rows to be present on page 2
+                WebDriverWait(driver, CONFIG['TIMEOUT']).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "tr.group"))
+                )
+                
+                logging.info("Page 2 loaded successfully")
+                
+                # Scrape page 2
+                logging.info("=== Scraping Page 2 ===")
+                page2_data = extract_brands_from_current_page(driver)
+                all_brands_data.extend(page2_data)
+                logging.info(f"Page 2: Extracted {len(page2_data)} brands")
+                
+            except Exception as e:
+                logging.warning(f"Could not navigate to page 2: {str(e)}")
+                logging.info("Continuing with page 1 data only")
             
-            logging.info(f"Successfully extracted data for {len(brands_data)} brands")
+            logging.info(f"Total brands extracted: {len(all_brands_data)}")
             
             # Save to Excel
-            if brands_data:
-                save_to_excel(brands_data)
-                return len(brands_data)
+            if all_brands_data:
+                save_to_excel(all_brands_data)
+                return len(all_brands_data)
             else:
-                raise Exception("No brand data found on the page")
+                raise Exception("No brand data found on any page")
                 
         except Exception as e:
             retry_count += 1
@@ -212,6 +204,52 @@ def scrape_euka_brands(url):
         finally:
             if driver:
                 driver.quit()
+
+def extract_brands_from_current_page(driver):
+    """
+    Extracts brand data from the current page (limited to 10 brands).
+    """
+    brands_data = []
+    
+    # Find the specific table with "Brands featuring this category" title
+    # Look for the table that contains the brands data
+    table_rows = driver.find_elements(By.CSS_SELECTOR, "tr.group")
+    logging.info(f"Found {len(table_rows)} total table rows on current page")
+    
+    # Limit to first 10 brand rows only
+    count = 0
+    for row in table_rows:
+        if count >= 10:  # Only extract first 10 brands
+            break
+            
+        try:
+            # Extract brand name (first td with button)
+            brand_button = row.find_element(By.CSS_SELECTOR, "td button")
+            brand_name = brand_button.text.strip()
+            
+            # Extract number of products (second td)
+            tds = row.find_elements(By.CSS_SELECTOR, "td")
+            if len(tds) >= 2:
+                num_products = tds[1].text.strip()
+            else:
+                num_products = "N/A"
+            
+            # Extract total sales (third td)
+            if len(tds) >= 3:
+                total_sales = tds[2].text.strip()
+            else:
+                total_sales = "N/A"
+            
+            if brand_name:
+                brands_data.append((brand_name, num_products, total_sales))
+                logging.info(f"Extracted: {brand_name} - {num_products} products - {total_sales}")
+                count += 1
+            
+        except Exception as e:
+            logging.warning(f"Error extracting data from row: {str(e)}")
+            continue
+    
+    return brands_data
 
 # URL to scrape
 url = "https://app.euka.ai/social-intelligence/categories/7"
